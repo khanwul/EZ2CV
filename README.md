@@ -81,8 +81,13 @@ matching geometry profile and note-template directory automatically.
 Run the full pipeline:
 
 ```bash
+uv run ez2cv
 uv run ez2cv "config/<song>.toml"
 ```
+
+With no TOML argument, every song config directly under `config/` is processed
+in filename order. The `config/song.toml` template and nested profile/skin
+TOMLs are skipped.
 
 The raw detection result is written before chart inference. Rebuild a chart
 without decoding the video again:
