@@ -75,7 +75,8 @@ Crop each template from a clean frame of your gameplay video — the note must b
 
 Configs live under `config/`. To analyze different songs, pass its TOML path as an argument. Use `config/song.toml` as a template for new songs.
 
-Set `setup.key_mode` to `4k`, `5k`, `6k`, or `8k`. The resolver selects the
+Set `setup.key_mode` to `4k`, `5k`, `6k`, or `8k`, and `setup.difficulty` to
+`EZ`, `NM`, `HD`, or `SHD`. The resolver selects the
 matching geometry profile and note-template directory automatically.
 
 Run the full pipeline:
@@ -93,7 +94,7 @@ The raw detection result is written before chart inference. Rebuild a chart
 without decoding the video again:
 
 ```bash
-uv run ez2cv "out/<song>/<song>_raw.json" --from-raw
+uv run ez2cv "out/<song>/<difficulty>/<song>_raw.json" --from-raw
 ```
 
 ## Config layout
@@ -107,10 +108,10 @@ uv run ez2cv "out/<song>/<song>_raw.json" --from-raw
 
 ## Output
 
-Two JSON files are written under `out/<song>/`:
+Two JSON files are written under `out/<song>/<difficulty>/`:
 
-- `<song>_raw.json` — reloadable ms-based detection checkpoint (schema 2.0)
-- `<song>_chart.json` — `ez2cv.chart` 3.0 tick chart with explicit tempo and
+- `<song>_raw.json` — reloadable ms-based detection checkpoint (schema 2.1)
+- `<song>_chart.json` — `ez2cv.chart` 3.1 tick chart with explicit tempo and
   meter timelines
 
 ## Tests

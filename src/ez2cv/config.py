@@ -107,6 +107,7 @@ class RunConfig:
     """Resolved settings used only by video decoding and detection."""
     # --- provenance ----------------------------------------------------------
     song_name: str
+    difficulty: str
     skin_name: str
     key_mode: str
     display_resolution: tuple[int, int]
@@ -151,7 +152,7 @@ class RunConfig:
     min_longnote_px: int                    # head-tail gap below this -> tap
 
     def summary(self) -> None:
-        print(f"=== Config: {self.skin_name} / {self.key_mode} / "
+        print(f"=== Config: {self.skin_name} / {self.key_mode} / {self.difficulty} / "
               f"{self.display_resolution[0]}x{self.display_resolution[1]} ===")
         print(f"  video      : {self.video_path}")
         print(f"  fps/speed  : {self.fps} / {self.note_speed}   "
@@ -209,6 +210,10 @@ def load_config(song_toml_path: str | Path) -> RunConfig:
     setup       = song["setup"]
     skin_name   = setup["skin"]
     key_mode    = str(setup["key_mode"]).strip().lower()
+    difficulty  = str(setup["difficulty"]).strip().upper()
+    if difficulty not in {"EZ", "NM", "HD", "SHD"}:
+        raise ConfigError(
+            f"setup.difficulty must be EZ, NM, HD, or SHD (got {difficulty!r})")
     res_str     = setup["display_resolution"]
 
     skin_path    = config_root / "skins" / skin_name / "skin.toml"
@@ -408,6 +413,7 @@ def load_config(song_toml_path: str | Path) -> RunConfig:
 
     return RunConfig(
         song_name=song_name,
+        difficulty=difficulty,
         skin_name=skin_name,
         key_mode=key_mode,
         display_resolution=prof_res,

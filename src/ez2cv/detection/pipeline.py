@@ -71,6 +71,7 @@ def _print_progress(done: int, total: int, *, width: int = 40,
 class RawChart:
     """Serializable ms-domain checkpoint produced by video detection."""
     song_name: str
+    difficulty: str
     skin_name: str
     key_mode: str
     lane_colors: tuple[str, ...]
@@ -127,7 +128,8 @@ class RawChart:
         sigma_median = float(np.median(sigmas)) if sigmas else 0.0
         sigma_p95 = float(np.percentile(sigmas, 95)) if sigmas else 0.0
         lines = [
-            f"=== Detection result — {self.duration_ms / 1000:.1f}s, "
+            f"=== Detection result — {self.difficulty}, "
+            f"{self.duration_ms / 1000:.1f}s, "
             f"{self.frame_count} frames ===",
             f"  notes        : {len(self.notes)}  "
             f"({len(self.taps)} tap, {len(self.longnotes)} longnote)",
@@ -214,6 +216,7 @@ class DetectionPipeline:
 
         return RawChart(
             song_name=self.cal.song_name,
+            difficulty=self.cal.difficulty,
             skin_name=self.cal.skin_name,
             key_mode=self.cal.key_mode,
             lane_colors=tuple(ln.color for ln in self.cal.lanes),
