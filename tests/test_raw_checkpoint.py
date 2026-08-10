@@ -8,12 +8,14 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from ez2cv.chart import build_chart
+from ez2cv.chart.meter import TimeSignature, TimeSigVariant
 from ez2cv.cli import run
 from ez2cv.detection import RawChart
 from ez2cv.detection.barline import BarlineEvent
 from ez2cv.detection.beat import BeatEvent
 from ez2cv.detection.tracking import RawNote
-from ez2cv.io import read_raw, serialize_raw, write_raw
+from ez2cv.io import (read_chart, read_raw, serialize_chart, serialize_raw,
+                      write_chart, write_raw)
 
 
 def _raw_chart() -> RawChart:
@@ -112,6 +114,29 @@ class RawCheckpointTest(unittest.TestCase):
                 with redirect_stdout(StringIO()):
                     run("ignored.toml", chart_image=False, progress=False)
             self.assertTrue(Path("out/demo/demo_raw.json").is_file())
+
+    def test_v3_chart_round_trip_and_meter_events(self):
+        chart = build_chart(_raw_chart())
+        chart.global_time_sig = TimeSignature(4, 4)
+        chart.variant_measures = [
+            TimeSigVariant(1, 1, TimeSignature(3, 4))]
+        chart.barlines_tick = [0, 768, 1344, 2112]
+
+        payload = serialize_chart(chart)
+        self.assertEqual((payload["format"], payload["version"]),
+                         ("ez2cv.chart", "3.0"))
+        self.assertEqual(payload["timing"]["meter_events"], [
+            {"start_tick": 0, "numerator": 4, "denominator": 4},
+            {"start_tick": 768, "numerator": 3, "denominator": 4},
+            {"start_tick": 1344, "numerator": 4, "denominator": 4},
+        ])
+        self.assertEqual(payload["notes"][0]["id"], 0)
+        self.assertIs(payload["notes"][0]["off_grid"], False)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = write_chart(chart, root=temp_dir)
+            loaded = read_chart(path)
+        self.assertEqual(loaded, payload)
 
 
 if __name__ == "__main__":

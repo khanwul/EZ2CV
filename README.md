@@ -104,8 +104,9 @@ uv run ez2cv "out/<song>/<song>_raw.json" --from-raw
 
 Two JSON files are written under `out/<song>/`:
 
-- `<song>_raw.json` — reloadable ms-based detection checkpoint
-- `<song>_chart.json` — tick-based chart with BPM and time signature
+- `<song>_raw.json` — reloadable ms-based detection checkpoint (schema 2.0)
+- `<song>_chart.json` — `ez2cv.chart` 3.0 tick chart with explicit tempo and
+  meter timelines
 
 ## Tests
 

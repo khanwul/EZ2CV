@@ -15,7 +15,9 @@ from ez2cv.detection.beat import BeatEvent
 from ez2cv.detection.tracking import RawNote
 
 
-SCHEMA_VERSION = "2.0"
+RAW_SCHEMA_VERSION = "2.0"
+CHART_FORMAT = "ez2cv.chart"
+CHART_VERSION = "3.0"
 
 
 def _reject_constant(value: str) -> None:
@@ -47,7 +49,7 @@ def _dump(obj: dict, path: Path) -> None:
 def serialize_raw(raw: RawChart) -> dict:
     """Return the complete, reloadable detection checkpoint payload."""
     return {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": RAW_SCHEMA_VERSION,
         "meta": {
             "song": raw.song_name,
             "skin": raw.skin_name,
@@ -105,10 +107,10 @@ def read_raw(path: str | Path) -> RawChart:
             source.read_text(encoding="utf-8"),
             parse_constant=_reject_constant,
         )
-        if payload["schema_version"] != SCHEMA_VERSION:
+        if payload["schema_version"] != RAW_SCHEMA_VERSION:
             raise ValueError(
                 f"unsupported schema_version {payload['schema_version']!r}; "
-                f"expected {SCHEMA_VERSION!r}")
+                f"expected {RAW_SCHEMA_VERSION!r}")
         meta = payload["meta"]
         raw = RawChart(
             song_name=str(meta["song"]),
@@ -180,57 +182,132 @@ def read_raw(path: str | Path) -> RawChart:
     return raw
 
 
-def _note_payload(note: ChartNote) -> dict:
-    out = {
+def _note_payload(note: ChartNote, note_id: int) -> dict:
+    return {
+        "id": note_id,
         "lane": int(note.lane),
         "start_tick": _tick(note.start_tick),
         "end_tick": _tick(note.end_tick) if note.end_tick is not None else None,
+        "off_grid": bool(note.off_grid),
     }
-    if note.off_grid:
-        out["off_grid"] = True
-    return out
 
 
 def _bpm_segment_payload(segment: BPMSegment) -> dict:
-    return {
+    out = {
         "start_tick": _tick(segment.start_tick),
         "end_tick": _tick(segment.end_tick),
-        "bpm_start": round(float(segment.bpm_start), 4),
-        "bpm_end": round(float(segment.bpm_end), 4),
     }
+    if segment.is_constant:
+        out.update(bpm=round(float(segment.bpm_start), 4),
+                   interpolation="step")
+    else:
+        out.update(bpm_start=round(float(segment.bpm_start), 4),
+                   bpm_end=round(float(segment.bpm_end), 4),
+                   interpolation="linear_time")
+    return out
 
 
-def _time_sig_payload(global_ts: TimeSignature,
-                      variants: list[TimeSigVariant]) -> dict:
-    return {
-        "global": [int(global_ts.numerator), int(global_ts.denominator)],
-        "variants": [{
-            "start_measure": int(variant.start_measure),
-            "end_measure": int(variant.end_measure),
-            "time_sig": [int(variant.time_sig.numerator),
-                         int(variant.time_sig.denominator)],
-        } for variant in variants],
-    }
+def _meter_events(global_ts: TimeSignature, variants: list[TimeSigVariant],
+                  barlines: list[int]) -> list[dict]:
+    meters = [global_ts] * max(0, len(barlines) - 1)
+    for variant in variants:
+        meters[variant.start_measure:variant.end_measure + 1] = [
+            variant.time_sig] * (variant.end_measure - variant.start_measure + 1)
+
+    events: list[dict] = []
+    previous = None
+    for measure, meter in enumerate(meters):
+        if meter != previous:
+            events.append({
+                "start_tick": _tick(barlines[measure]),
+                "numerator": int(meter.numerator),
+                "denominator": int(meter.denominator),
+            })
+            previous = meter
+    return events
 
 
 def serialize_chart(chart: Chart) -> dict:
     return {
-        "schema_version": SCHEMA_VERSION,
+        "format": CHART_FORMAT,
+        "version": CHART_VERSION,
         "meta": {
             "song": chart.song_name,
             "key_mode": chart.key_mode,
             "lane_colors": list(chart.lane_colors),
-            "tick_resolution": int(chart.tick_resolution),
-            "measure_zero_ms": _ms(chart.measure_zero_ms),
             "duration_ms": _ms(chart.stats["structure"]["duration_ms"]),
         },
-        "bpm_segments": [_bpm_segment_payload(s) for s in chart.bpm_segments],
-        "time_signature": _time_sig_payload(chart.global_time_sig,
-                                            chart.variant_measures),
-        "barlines_tick": [_tick(tick) for tick in chart.barlines_tick],
-        "notes": [_note_payload(note) for note in chart.notes],
-        "stats": chart.stats,
+        "timing": {
+            "ticks_per_quarter": int(chart.tick_resolution),
+            "tick_zero_ms": _ms(chart.measure_zero_ms),
+            "tempo_segments": [
+                _bpm_segment_payload(segment)
+                for segment in chart.bpm_segments],
+            "meter_events": _meter_events(
+                chart.global_time_sig, chart.variant_measures,
+                chart.barlines_tick),
+            "barlines": [_tick(tick) for tick in chart.barlines_tick],
+        },
+        "notes": [
+            _note_payload(note, note_id)
+            for note_id, note in enumerate(chart.notes)],
+        "analysis": {"stats": chart.stats},
     }
+
+
+def read_chart(path: str | Path) -> dict:
+    """Load and validate a v3 chart for renderers and external consumers."""
+    source = Path(path)
+    try:
+        chart = json.loads(source.read_text(encoding="utf-8"),
+                           parse_constant=_reject_constant)
+        if chart["format"] != CHART_FORMAT or chart["version"] != CHART_VERSION:
+            raise ValueError(
+                f"unsupported chart {chart.get('format')!r} "
+                f"version {chart.get('version')!r}")
+        meta, timing, notes = chart["meta"], chart["timing"], chart["notes"]
+        lane_count = len(meta["lane_colors"])
+        resolution = int(timing["ticks_per_quarter"])
+        barlines = timing["barlines"]
+        tempos = timing["tempo_segments"]
+        meters = timing["meter_events"]
+        if lane_count <= 0 or resolution <= 0:
+            raise ValueError("invalid lanes or tick resolution")
+        if len(barlines) < 2 or any(
+                left >= right for left, right
+                in zip(barlines, barlines[1:])):
+            raise ValueError("barlines must be strictly increasing")
+        if not tempos or not meters:
+            raise ValueError("tempo and meter timelines must not be empty")
+        if meters[0]["start_tick"] != barlines[0]:
+            raise ValueError("first meter must start at the first barline")
+        for segment in tempos:
+            if segment["end_tick"] <= segment["start_tick"]:
+                raise ValueError("invalid tempo segment bounds")
+            interpolation = segment["interpolation"]
+            bpms = ([segment["bpm"]] if interpolation == "step" else
+                    [segment["bpm_start"], segment["bpm_end"]]
+                    if interpolation == "linear_time" else [])
+            if not bpms or any(not math.isfinite(float(bpm)) or bpm <= 0
+                               for bpm in bpms):
+                raise ValueError("invalid tempo segment")
+        for meter in meters:
+            if meter["numerator"] <= 0 or meter["denominator"] <= 0:
+                raise ValueError("invalid meter event")
+        for note in notes:
+            if not 0 <= note["lane"] < lane_count:
+                raise ValueError("note lane out of range")
+            if (note["end_tick"] is not None
+                    and note["end_tick"] <= note["start_tick"]):
+                raise ValueError("invalid longnote end")
+            if not isinstance(note["off_grid"], bool):
+                raise ValueError("off_grid must be boolean")
+        numeric = [meta["duration_ms"], timing["tick_zero_ms"]]
+        if not all(math.isfinite(float(value)) for value in numeric):
+            raise ValueError("non-finite chart metadata")
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid chart {source}: {exc}") from exc
+    return chart
 
 
 def output_dir(song_name: str, *, root: str | Path = "out") -> Path:

@@ -153,7 +153,10 @@ round trip.
 
 The output `Chart` owns only chart metadata, BPM segments, time signatures,
 notes, barline ticks, and statistics. Neither `RawChart` nor `Chart` depends on
-detection configuration objects.
+detection configuration objects. `write_chart()` serializes it as
+`ez2cv.chart` 3.0: timing lives under one `timing` object, fixed and ramped BPM
+segments declare their interpolation, meter changes are tick-addressed events,
+and derived statistics live under `analysis`.
 
 ## Verification
 
