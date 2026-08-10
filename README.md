@@ -110,9 +110,9 @@ uv run ez2cv "out/<song>/<difficulty>/<song>_raw.json" --from-raw
 
 Two JSON files are written under `out/<song>/<difficulty>/`:
 
-- `<song>_raw.json` — reloadable ms-based detection checkpoint (schema 2.1)
-- `<song>_chart.json` — `ez2cv.chart` 3.1 tick chart with explicit tempo and
-  meter timelines
+- `<song>_raw.json` — reloadable ms-based detection checkpoint (schema 2.2)
+- `<song>_chart.json` — `ez2cv.chart` 3.2 tick chart with explicit game, tempo,
+  and meter timelines
 
 ## Tests
 

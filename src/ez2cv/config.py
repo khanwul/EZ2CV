@@ -108,6 +108,7 @@ class RunConfig:
     # --- provenance ----------------------------------------------------------
     song_name: str
     difficulty: str
+    game: str
     skin_name: str
     key_mode: str
     display_resolution: tuple[int, int]
@@ -226,6 +227,10 @@ def load_config(song_toml_path: str | Path) -> RunConfig:
     if profile_mode != key_mode:
         raise ConfigError(
             f"profile key_mode '{profile_mode}' != song key_mode '{key_mode}'")
+
+    game = str(profile["meta"]["game"]).strip().lower()
+    if not game:
+        raise ConfigError("profile game must not be empty")
 
     key_count   = profile["meta"]["key_count"]
     lane_colors = skin["lane_colors"].get(key_mode)
@@ -414,6 +419,7 @@ def load_config(song_toml_path: str | Path) -> RunConfig:
     return RunConfig(
         song_name=song_name,
         difficulty=difficulty,
+        game=game,
         skin_name=skin_name,
         key_mode=key_mode,
         display_resolution=prof_res,

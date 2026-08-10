@@ -72,6 +72,7 @@ class RawChart:
     """Serializable ms-domain checkpoint produced by video detection."""
     song_name: str
     difficulty: str
+    game: str
     skin_name: str
     key_mode: str
     lane_colors: tuple[str, ...]
@@ -217,6 +218,7 @@ class DetectionPipeline:
         return RawChart(
             song_name=self.cal.song_name,
             difficulty=self.cal.difficulty,
+            game=self.cal.game,
             skin_name=self.cal.skin_name,
             key_mode=self.cal.key_mode,
             lane_colors=tuple(ln.color for ln in self.cal.lanes),

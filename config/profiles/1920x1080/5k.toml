@@ -8,6 +8,7 @@
 # =============================================================================
 
 [meta]
+game               = "ez2on_reboot_r"
 display_resolution = [1920, 1080]
 key_mode           = "5k"
 key_count          = 5            # MUST equal len(lane_colors["5k"]) in skin.toml

@@ -15,9 +15,11 @@ from ez2cv.detection.beat import BeatEvent
 from ez2cv.detection.tracking import RawNote
 
 
-RAW_SCHEMA_VERSION = "2.1"
+RAW_SCHEMA_VERSION = "2.2"
+RAW_READABLE_VERSIONS = {"2.1", "2.2"}
 CHART_FORMAT = "ez2cv.chart"
-CHART_VERSION = "3.1"
+CHART_VERSION = "3.2"
+CHART_READABLE_VERSIONS = {"3.1", "3.2"}
 
 
 def _reject_constant(value: str) -> None:
@@ -53,6 +55,7 @@ def serialize_raw(raw: RawChart) -> dict:
         "meta": {
             "song": raw.song_name,
             "difficulty": raw.difficulty,
+            "game": raw.game,
             "skin": raw.skin_name,
             "key_mode": raw.key_mode,
             "lane_colors": list(raw.lane_colors),
@@ -108,16 +111,22 @@ def read_raw(path: str | Path) -> RawChart:
             source.read_text(encoding="utf-8"),
             parse_constant=_reject_constant,
         )
-        if payload["schema_version"] != RAW_SCHEMA_VERSION:
+        version = payload["schema_version"]
+        if version not in RAW_READABLE_VERSIONS:
             raise ValueError(
-                f"unsupported schema_version {payload['schema_version']!r}; "
-                f"expected {RAW_SCHEMA_VERSION!r}")
+                f"unsupported schema_version {version!r}; expected one of "
+                f"{sorted(RAW_READABLE_VERSIONS)!r}")
         meta = payload["meta"]
+        if version == "2.1":
+            meta.setdefault("game", "unknown")
+        if not isinstance(meta["game"], str) or not meta["game"].strip():
+            raise ValueError("invalid game")
         if meta["difficulty"] not in {"EZ", "NM", "HD", "SHD"}:
             raise ValueError("invalid difficulty")
         raw = RawChart(
             song_name=str(meta["song"]),
             difficulty=str(meta["difficulty"]),
+            game=meta["game"],
             skin_name=str(meta["skin"]),
             key_mode=str(meta["key_mode"]),
             lane_colors=tuple(str(color) for color in meta["lane_colors"]),
@@ -238,6 +247,7 @@ def serialize_chart(chart: Chart) -> dict:
         "meta": {
             "song": chart.song_name,
             "difficulty": chart.difficulty,
+            "game": chart.game,
             "key_mode": chart.key_mode,
             "lane_colors": list(chart.lane_colors),
             "duration_ms": _ms(chart.stats["structure"]["duration_ms"]),
@@ -266,11 +276,16 @@ def read_chart(path: str | Path) -> dict:
     try:
         chart = json.loads(source.read_text(encoding="utf-8"),
                            parse_constant=_reject_constant)
-        if chart["format"] != CHART_FORMAT or chart["version"] != CHART_VERSION:
+        if (chart["format"] != CHART_FORMAT
+                or chart["version"] not in CHART_READABLE_VERSIONS):
             raise ValueError(
                 f"unsupported chart {chart.get('format')!r} "
                 f"version {chart.get('version')!r}")
         meta, timing, notes = chart["meta"], chart["timing"], chart["notes"]
+        if chart["version"] == "3.1":
+            meta.setdefault("game", "unknown")
+        if not isinstance(meta["game"], str) or not meta["game"].strip():
+            raise ValueError("invalid game")
         if meta["difficulty"] not in {"EZ", "NM", "HD", "SHD"}:
             raise ValueError("invalid difficulty")
         lane_count = len(meta["lane_colors"])

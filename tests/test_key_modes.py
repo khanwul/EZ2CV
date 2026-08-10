@@ -26,6 +26,7 @@ class KeyModeConfigTest(unittest.TestCase):
                     profile = tomllib.load(file)
 
                 self.assertEqual(profile["meta"]["key_mode"], mode)
+                self.assertEqual(profile["meta"]["game"], "ez2on_reboot_r")
                 self.assertEqual(profile["meta"]["key_count"], key_count)
                 self.assertEqual(len(colors[mode]), key_count)
                 self.assertTrue((ROOT / f"config/skins/ez2on/{mode}").is_dir())

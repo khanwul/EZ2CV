@@ -2,6 +2,7 @@
 # Calibrated from a speed-8.0, 60fps EZ2ON recording.
 
 [meta]
+game = "ez2on_reboot_r"
 display_resolution = [1920, 1080]
 key_mode = "4k"
 key_count = 4

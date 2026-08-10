@@ -22,6 +22,7 @@ def _raw_chart() -> RawChart:
     return RawChart(
         song_name="demo",
         difficulty="SHD",
+        game="ez2on_reboot_r",
         skin_name="ez2on",
         key_mode="5k",
         lane_colors=("white", "cyan", "white", "cyan", "white"),
@@ -66,6 +67,7 @@ class RawCheckpointTest(unittest.TestCase):
             loaded = read_raw(path)
 
         self.assertEqual(loaded, raw)
+        self.assertEqual(loaded.game, "ez2on_reboot_r")
         chart = build_chart(loaded)
         self.assertEqual(chart.song_name, "demo")
         self.assertEqual(chart.difficulty, "SHD")
@@ -90,6 +92,17 @@ class RawCheckpointTest(unittest.TestCase):
 
         self.assertEqual([note.timing_sigma_ms for note in loaded.notes],
                          [0.0, 0.0])
+
+    def test_v21_raw_without_game_gets_unknown(self):
+        payload = serialize_raw(_raw_chart())
+        payload["schema_version"] = "2.1"
+        del payload["meta"]["game"]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "raw.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            loaded = read_raw(path)
+
+        self.assertEqual(loaded.game, "unknown")
 
     def test_negative_timing_sigma_is_rejected(self):
         payload = serialize_raw(_raw_chart())
@@ -139,7 +152,8 @@ class RawCheckpointTest(unittest.TestCase):
 
         payload = serialize_chart(chart)
         self.assertEqual((payload["format"], payload["version"]),
-                         ("ez2cv.chart", "3.1"))
+                         ("ez2cv.chart", "3.2"))
+        self.assertEqual(payload["meta"]["game"], "ez2on_reboot_r")
         self.assertEqual(payload["meta"]["difficulty"], "SHD")
         self.assertEqual(payload["timing"]["meter_events"], [
             {"start_tick": 0, "numerator": 4, "denominator": 4},
@@ -153,6 +167,32 @@ class RawCheckpointTest(unittest.TestCase):
             path = write_chart(chart, root=temp_dir)
             loaded = read_chart(path)
         self.assertEqual(loaded, payload)
+
+    def test_v31_chart_without_game_gets_unknown(self):
+        payload = serialize_chart(build_chart(_raw_chart()))
+        payload["version"] = "3.1"
+        del payload["meta"]["game"]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "chart.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            loaded = read_chart(path)
+
+        self.assertEqual(loaded["meta"]["game"], "unknown")
+
+    def test_current_formats_reject_invalid_game(self):
+        payloads = [
+            (serialize_raw(_raw_chart()), read_raw),
+            (serialize_chart(build_chart(_raw_chart())), read_chart),
+        ]
+        for payload, reader in payloads:
+            for game in ("", "   ", 1):
+                with self.subTest(reader=reader.__name__, game=game), \
+                        tempfile.TemporaryDirectory() as temp_dir:
+                    payload["meta"]["game"] = game
+                    path = Path(temp_dir) / "payload.json"
+                    path.write_text(json.dumps(payload), encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "invalid game"):
+                        reader(path)
 
 
 if __name__ == "__main__":
