@@ -26,7 +26,8 @@ Real-video hazards this tracker is built around
    interpolates. Grace is lnhead-ONLY: a tap or tail just vanishes, so letting
    it linger would make it steal a later note's detections.
 3. MISSED POST-TRIGGER FRAME. If the stutter eats the one frame a tap is
-   visible past the line, its crossing is EXTRAPOLATED from the global speed.
+   visible past the line, its crossing is extrapolated from a recent local
+   trajectory fit, with global speed as the plausibility gate and fallback.
 
 Output: RawNote objects, ms-based. Tick conversion / snapping is chart conversion.
 """
@@ -68,6 +69,7 @@ class TriggerEvent:
     score: float               # raw template-match strength
     extrapolated: bool = False
     confidence: float = 1.0    # composite reliability (see _trigger_confidence)
+    timing_sigma_ms: float = 0.0
 
 
 @dataclass
@@ -80,6 +82,7 @@ class RawNote:
     color: str
     confidence: float
     extrapolated: bool = False
+    timing_sigma_ms: float = 0.0
 
 
 # =============================================================================
@@ -153,7 +156,9 @@ class NoteTracker:
                  max_stale_frames: int = 4,
                  max_stale_grace: int = 15,
                  up_jitter_px: float = 6.0,
-                 down_jitter_px: float = 16.0):
+                 down_jitter_px: float = 16.0,
+                 local_fit_points: int = 8,
+                 timing_sigma_floor_frames: float = 0.25):
         """
         max_stale_frames : drop a normal edge unseen this many frames.
         max_stale_grace  : an un-emitted *lnhead* edge near the trigger is kept
@@ -167,6 +172,8 @@ class NoteTracker:
         self.max_grace = max_stale_grace
         self.up_jitter = up_jitter_px
         self.down_jitter = down_jitter_px
+        self.local_fit_points = local_fit_points
+        self.timing_sigma_floor_frames = timing_sigma_floor_frames
 
         self.speed = ScrollSpeedEstimator(cal)
         self._lanes = {ln.index: [] for ln in cal.lanes}
@@ -298,7 +305,7 @@ class NoteTracker:
             return True
         return False
 
-    def _tail_lag_frames(self) -> float:
+    def _tail_lag_frames(self, speed: float | None = None) -> float:
         """Frames to ADD to a longnote tail's crossing time.
 
         A note/lnhead is hit the instant its tracked top reaches the line, and
@@ -314,9 +321,49 @@ class NoteTracker:
         the edge tracking, pairing and extrapolation gates are untouched (the
         bias-fix must not change which notes are detected, only an end time).
         """
-        sp = self.speed.speed
+        sp = self.speed.speed if speed is None else speed
         descent = self.cal.note_height + self.cal.tail_release_offset_px
         return (descent / sp) if sp > 0 else 0.0
+
+    def _local_crossing(self, trajectory, target_y: float
+                        ) -> tuple[float, float, float] | None:
+        """Fit recent ``y(frame)`` and return crossing, speed, and sigma-ms."""
+        points = trajectory[-self.local_fit_points:]
+        if len(points) < 3:
+            return None
+        frames = np.array([point[0] for point in points], dtype=float)
+        ys = np.array([point[1] for point in points], dtype=float)
+        origin = frames[0]
+        x = frames - origin
+        speed, intercept = np.polyfit(x, ys, 1)
+        if not (0.0 < speed <= ScrollSpeedEstimator._HI):
+            return None
+
+        cross_x = (target_y - intercept) / speed
+        cross_frame = origin + cross_x
+        projection = cross_frame - frames[-1]
+        if projection < -0.5 or projection > 3.5:
+            return None
+
+        residual = ys - (intercept + speed * x)
+        dof = len(points) - 2
+        residual_std = float(np.sqrt(np.sum(residual ** 2) / dof))
+        spread = float(np.sum((x - np.mean(x)) ** 2))
+        if spread > 0:
+            prediction_std = residual_std * np.sqrt(
+                1.0 + 1.0 / len(points)
+                + (cross_x - np.mean(x)) ** 2 / spread)
+        else:
+            prediction_std = residual_std
+        sigma_frames = max(
+            self.timing_sigma_floor_frames, prediction_std / speed)
+        return (float(cross_frame), float(speed),
+                sigma_frames / self.fps * 1000.0)
+
+    def _fallback_sigma_ms(self, projection_frames: float) -> float:
+        """Conservative uncertainty for the old global-speed fallback."""
+        sigma_frames = max(0.5, 0.5 * max(0.0, projection_frames))
+        return sigma_frames / self.fps * 1000.0
 
     def _check_trigger(self, e):
         """Emit if the trajectory straddles the trigger line (interpolation)."""
@@ -335,42 +382,68 @@ class NoteTracker:
                 # several frames. The head actually crossed right after `fa`, so
                 # project from there at the global descent speed instead.
                 sp = self.speed.speed
+                sigma_ms = self.timing_sigma_floor_frames / self.fps * 1000.0
                 if fb - fa > self.max_stale and e.type == "lnhead" and sp > 0:
-                    cf = fa + (self.trigger - ya) / sp
+                    local = self._local_crossing(traj[:i + 1], self.trigger)
+                    if local is None:
+                        projection = (self.trigger - ya) / sp
+                        cf = fa + projection
+                        sigma_ms = self._fallback_sigma_ms(projection)
+                    else:
+                        cf, sp, sigma_ms = local
                 else:
                     frac = (self.trigger - ya) / (yb - ya)
                     cf = fa + frac * (fb - fa)
+                    local = self._local_crossing(traj[:i + 2], self.trigger)
+                    if local is not None:
+                        _, sp, local_sigma_ms = local
+                        sigma_ms = max(sigma_ms, local_sigma_ms)
                 if e.type == "lntail":
                     cf += self._tail_lag_frames()
                 match = (sa + sb) / 2
                 conf = _trigger_confidence(len(traj), 0.0, match)
                 return TriggerEvent(e.lane, e.type, cf,
                                     cf / self.fps * 1000.0, match,
-                                    confidence=conf)
+                                    confidence=conf,
+                                    timing_sigma_ms=sigma_ms)
         return None
 
     def _extrapolate_trigger(self, e):
         """Fallback: project a near-miss edge forward to the trigger line.
 
-        Uses the GLOBAL speed (robust, trimmed-mean smoothed) rather than the
-        edge's own last segment, which the stutter can corrupt.
+        Tap onsets fit their recent trajectory; global speed remains the gate
+        and fallback. Longnote endpoints retain their paired-duration model.
         """
         if len(e.trajectory) < 2:
             return None
         fb, yb, sb = e.trajectory[-1]
         if yb >= self.trigger:
             return None
-        sp = self.speed.speed
-        if sp <= 0 or (self.trigger - yb) > 3 * sp:    # died too far short
+        global_speed = self.speed.speed
+        if (global_speed <= 0
+                or (self.trigger - yb) > 3 * global_speed):
             return None
-        cf = fb + (self.trigger - yb) / sp
+        # Longnote endpoints form one duration measurement with separately
+        # calibrated head-hold and release behavior. Keep their established
+        # global-speed projection so tap-onset refinement cannot move combo
+        # boundaries.
+        local = (None if e.type != "note"
+                 else self._local_crossing(e.trajectory, self.trigger))
+        if local is None:
+            sp = global_speed
+            projection = (self.trigger - yb) / sp
+            cf = fb + projection
+            sigma_ms = self._fallback_sigma_ms(projection)
+        else:
+            cf, sp, sigma_ms = local
         if e.type == "lntail":
             cf += self._tail_lag_frames()
-        proj_ratio = (self.trigger - yb) / (3.0 * sp)  # 0 = clean .. 1 = max guess
+        proj_ratio = (self.trigger - yb) / (3.0 * global_speed)
         conf = _trigger_confidence(len(e.trajectory), proj_ratio, sb)
         return TriggerEvent(e.lane, e.type, cf,
                             cf / self.fps * 1000.0, sb,
-                            extrapolated=True, confidence=conf)
+                            extrapolated=True, confidence=conf,
+                            timing_sigma_ms=sigma_ms)
 
 
 # =============================================================================
@@ -403,9 +476,11 @@ class LongnoteStateMachine:
         conf = min(head.confidence, end_ev.confidence)   # weakest end governs
         if end_ev.ms - head.ms < self._min_ln_ms:        # too short -> it's a tap
             return RawNote(head.lane, "tap", head.ms, None, color,
-                           conf, extrapolated=extrap)
+                           conf, extrapolated=extrap,
+                           timing_sigma_ms=head.timing_sigma_ms)
         return RawNote(head.lane, "longnote", head.ms, end_ev.ms, color,
-                       conf, extrapolated=extrap)
+                       conf, extrapolated=extrap,
+                       timing_sigma_ms=head.timing_sigma_ms)
 
     def feed(self, ev: TriggerEvent):
         """Consume one TriggerEvent; return a RawNote when one completes."""
@@ -413,7 +488,8 @@ class LongnoteStateMachine:
 
         if ev.type == "note":
             return RawNote(ev.lane, "tap", ev.ms, None, color, ev.confidence,
-                           extrapolated=ev.extrapolated)
+                           extrapolated=ev.extrapolated,
+                           timing_sigma_ms=ev.timing_sigma_ms)
 
         if ev.type == "lnhead":
             pending = self._open.get(ev.lane)
@@ -451,7 +527,8 @@ class LongnoteStateMachine:
         for lane, head in self._open.items():
             out.append(RawNote(lane, "tap", head.ms, None,
                                self._colors[lane], head.confidence,
-                               extrapolated=head.extrapolated))
+                               extrapolated=head.extrapolated,
+                               timing_sigma_ms=head.timing_sigma_ms))
         self._open.clear()
         return out
 

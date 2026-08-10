@@ -56,6 +56,33 @@ class RawCheckpointTest(unittest.TestCase):
         self.assertEqual(len(chart.notes), 2)
         self.assertEqual(chart.notes[0].start_tick, 192)
         self.assertEqual(chart.notes[1].end_tick, 576)
+        self.assertIn("timing_outlier_ratio", chart.stats["rhythm"])
+        self.assertIn("fine_grid_ratio", chart.stats["rhythm"])
+        self.assertIn("base_grid_outlier_ratio", chart.stats["rhythm"])
+        self.assertEqual(
+            len(chart.stats["rhythm"]["measure_grid_max_denominator"]),
+            chart.stats["structure"]["measure_count"])
+
+    def test_legacy_raw_note_without_timing_sigma_is_supported(self):
+        payload = serialize_raw(_raw_chart())
+        for note in payload["notes"]:
+            del note["timing_sigma_ms"]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "raw.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            loaded = read_raw(path)
+
+        self.assertEqual([note.timing_sigma_ms for note in loaded.notes],
+                         [0.0, 0.0])
+
+    def test_negative_timing_sigma_is_rejected(self):
+        payload = serialize_raw(_raw_chart())
+        payload["notes"][0]["timing_sigma_ms"] = -1.0
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "raw.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "negative timing sigma"):
+                read_raw(path)
 
     def test_invalid_schema_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp_dir:

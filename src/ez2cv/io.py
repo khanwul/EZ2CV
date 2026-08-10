@@ -73,6 +73,7 @@ def serialize_raw(raw: RawChart) -> dict:
                 "end_ms": _ms(note.end_ms) if note.end_ms is not None else None,
                 "confidence": round(float(note.confidence), 4),
                 "extrapolated": bool(note.extrapolated),
+                "timing_sigma_ms": _ms(note.timing_sigma_ms),
             }
             for note in raw.notes
         ],
@@ -132,6 +133,7 @@ def read_raw(path: str | Path) -> RawChart:
                 color=str(note["color"]),
                 confidence=float(note["confidence"]),
                 extrapolated=bool(note["extrapolated"]),
+                timing_sigma_ms=float(note.get("timing_sigma_ms", 0.0)),
             ) for note in payload["notes"]],
             beats=[BeatEvent(
                 frame_index=int(beat["frame_index"]),
@@ -151,6 +153,7 @@ def read_raw(path: str | Path) -> RawChart:
     numeric = [raw.fps, raw.note_speed, raw.min_bpm, raw.max_bpm]
     numeric.extend(note.trigger_ms for note in raw.notes)
     numeric.extend(note.end_ms for note in raw.notes if note.end_ms is not None)
+    numeric.extend(note.timing_sigma_ms for note in raw.notes)
     numeric.extend(beat.ms for beat in raw.beats)
     numeric.extend(barline.ms for barline in raw.barlines)
     if not all(math.isfinite(value) for value in numeric):
@@ -165,6 +168,8 @@ def read_raw(path: str | Path) -> RawChart:
         raise ValueError(f"invalid raw chart {source}: note lane out of range")
     if any(note.type not in {"tap", "longnote"} for note in raw.notes):
         raise ValueError(f"invalid raw chart {source}: unknown note type")
+    if any(note.timing_sigma_ms < 0 for note in raw.notes):
+        raise ValueError(f"invalid raw chart {source}: negative timing sigma")
     if any(note.type == "longnote" and (
             note.end_ms is None or note.end_ms <= note.trigger_ms)
             for note in raw.notes):
