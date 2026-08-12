@@ -22,6 +22,10 @@ note_height = 22
 trigger_template_y_top = 802
 tail_release_offset_px = 13
 
+[alignment]
+band_y = [814, 832]
+max_shift_px = 32
+
 [beat_indicator]
 roi = [728, 844, 731, 851]
 

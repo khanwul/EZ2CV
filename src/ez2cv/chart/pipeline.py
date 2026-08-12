@@ -4,7 +4,7 @@
     2. infer arbitrary per-measure meters on the beat grid
     3. select denoised tempo anchors, including clear mid-measure steps
     4. ms → tick conversion for every note (head + tail)
-    5. snap-to-grid (quantizer); longnote tails snap as RELATIVE lengths
+    5. snap-to-grid (quantizer); longnote tails compare endpoint and length snaps
     6. pickup-note policy: keep one measure pre-anacrusis, drop earlier
     7. ``Chart`` ready for serialization
 
@@ -28,12 +28,18 @@ from ez2cv.detection import RawChart
 from ez2cv.chart.clock import BPMSegment, TickClock
 from ez2cv.chart.meter import TimeSignature, TimeSigVariant
 from ez2cv.chart.quantize import (MEASURE_GRID_LEVELS, SnapResult,
-                                  snap_by_measure, snap_length,
+                                  choose_measure_grid, choose_measure_grids,
+                                  grid_distances,
+                                  snap_by_measure,
+                                  snap_tick,
                                   TRIPLET_DENOMS)
 from ez2cv.chart.timeline import infer_timeline
 
 
 TIMING_SIGMA_MULTIPLIER = 2.0
+COARSE_HEAD_ALPHA = 2.0
+FINE_HEAD_ALPHA = 0.4
+FINE_GRID_COST_TOLERANCE = 3.0
 
 
 # =============================================================================
@@ -42,11 +48,12 @@ TIMING_SIGMA_MULTIPLIER = 2.0
 
 @dataclass
 class ChartNote:
-    """Minimal tick-based note. color/type/snap/confidence are derivable."""
+    """Minimal playable note; review evidence lives in Chart.diagnostics."""
     lane: int
     start_tick: int
     end_tick: int | None       # None for taps
     off_grid: bool = False
+    needs_review: bool = False
 
 # =============================================================================
 # Chart
@@ -67,6 +74,7 @@ class Chart:
     notes: list[ChartNote]
     barlines_tick: list[int]
     stats: dict
+    diagnostics: list[dict]
 
     def summary(self) -> str:
         bpm_lo = min(s.bpm_start for s in self.bpm_segments)
@@ -81,6 +89,11 @@ class Chart:
             f"  measures         : {self.stats['structure']['measure_count']}",
             f"  timing outliers  : "
             f"{self.stats['rhythm']['timing_outlier_ratio']*100:.1f}%",
+            f"  needs review     : "
+            f"{self.stats['quality']['needs_review_ratio']*100:.1f}%",
+            f"  repaired beats   : "
+            f"+{self.stats['quality']['inserted_beat_count']} / "
+            f"-{self.stats['quality']['deleted_beat_count']}",
             f"  fine-grid ratio  : "
             f"{self.stats['rhythm']['fine_grid_ratio']*100:.1f}%",
             f"  predicted combo  : "
@@ -94,6 +107,10 @@ class Chart:
 # =============================================================================
 
 def build_chart(raw: RawChart) -> Chart:
+    if raw.tick_resolution != 192:
+        raise ValueError(
+            f"chart conversion requires 192 ticks per quarter "
+            f"(got {raw.tick_resolution})")
     if not raw.barlines:
         raise RuntimeError("chart conversion requires at least one barline — "
                            "no measure_zero anchor available")
@@ -111,12 +128,12 @@ def build_chart(raw: RawChart) -> Chart:
     ticks_per_global_measure = global_ts.ticks_per_measure(R)
 
     # --- 3. notes : raw ticks, then snap ------------------------------
-    notes, snaps, grid_levels = _convert_and_snap_notes(
+    notes, snaps, grid_levels, diagnostics = _convert_and_snap_notes(
         raw, clock, bl_ticks, ticks_per_global_measure)
 
     # --- 4. stats -----------------------------------------------------
     stats = _build_stats(notes, snaps, grid_levels, clock, raw, bl_ticks,
-                         variants)
+                         variants, timeline)
 
     return Chart(
         song_name=raw.song_name,
@@ -132,6 +149,7 @@ def build_chart(raw: RawChart) -> Chart:
         notes=notes,
         barlines_tick=bl_ticks,
         stats=stats,
+        diagnostics=diagnostics,
     )
 
 # ------------------------------------------------------------------ #
@@ -140,65 +158,192 @@ def _convert_and_snap_notes(raw: RawChart, clock: TickClock,
                             barline_ticks: list[int],
                             ticks_per_global_measure: int
                             ) -> tuple[list[ChartNote], list[SnapResult],
-                                       list[int]]:
-    """RawNote → ChartNote with head snap + relative tail snap."""
+                                       list[int], list[dict]]:
+    """RawNote → ChartNote with adaptive head and tail snapping."""
     R = clock.tick_resolution
 
-    # raw float ticks for every head
+    # Heads select per-measure vocabularies. Tails first remove their robust
+    # chart-wide detector bias, then may select one shared finer vocabulary.
+    # This prevents a constant sprite offset from promoting every measure while
+    # retaining genuine fine tail phases that repeat across the chart.
     raw_heads = [clock.ms_to_tick(n.trigger_ms) for n in raw.notes]
-
-    # One shared vocabulary per measure; tails remain length-snapped relatively.
+    end_indices = [i for i, note in enumerate(raw.notes)
+                   if note.type == "longnote" and note.end_ms is not None]
+    raw_ends = [clock.ms_to_tick(raw.notes[i].end_ms) for i in end_indices]
+    head_grid_floor = choose_measure_grid(
+        raw_heads, tick_resolution=R, cost_tolerance=1.0)
+    if head_grid_floor:
+        head_grid_floor = choose_measure_grid(
+            raw_heads, tick_resolution=R,
+            cost_tolerance=FINE_GRID_COST_TOLERANCE)
+    corrected_heads = list(raw_heads)
+    if head_grid_floor:
+        fine_step = 4.0 * R / max(MEASURE_GRID_LEVELS[head_grid_floor])
+        for segment in clock.segments:
+            indices = [i for i, tick in enumerate(raw_heads)
+                       if segment.start_tick <= tick < segment.end_tick]
+            if len(indices) < 4:
+                continue
+            residuals = [raw_heads[i] - round(raw_heads[i] / fine_step) * fine_step
+                         for i in indices]
+            phase_bias = float(np.median(residuals))
+            for i in indices:
+                corrected_heads[i] -= phase_bias
+    grid_levels = choose_measure_grids(
+        corrected_heads, barline_ticks, tick_resolution=R)
+    grid_levels = [max(level, head_grid_floor) for level in grid_levels]
+    if raw_ends:
+        coarse_ends = [snap_tick(
+            tick, tick_resolution=R, alpha=0.0,
+            triplet_context_penalty=0.0).tick for tick in raw_ends]
+        # Tail visibility can end before the musical release, never after it;
+        # a positive phase is musical evidence rather than detector lag and
+        # cannot safely promote the tail vocabulary.
+        observed_tail_bias = float(np.median(
+            np.asarray(raw_ends) - np.asarray(coarse_ends)))
+        tail_bias_tick = min(0.0, observed_tail_bias)
+        corrected_ends = [tick - tail_bias_tick for tick in raw_ends]
+        tail_grid_level = (choose_measure_grid(
+            corrected_ends, tick_resolution=R, cost_tolerance=1.0)
+            if observed_tail_bias <= 0.0 else 0)
+        if observed_tail_bias <= 0.0:
+            denominators = MEASURE_GRID_LEVELS[tail_grid_level]
+            fine_step = 4.0 * R / max(denominators)
+            candidates = np.linspace(-fine_step / 2.0, 0.0, 25)
+            tail_bias_tick = float(min(
+                candidates,
+                key=lambda bias: float(np.sum(grid_distances(
+                    np.asarray(raw_ends) - bias, denominators,
+                    tick_resolution=R) ** 2))))
+            corrected_ends = [tick - tail_bias_tick for tick in raw_ends]
+    else:
+        tail_bias_tick = 0.0
+        corrected_ends = []
+        tail_grid_level = 0
     snaps, grid_levels = snap_by_measure(
-        raw_heads, barline_ticks, tick_resolution=R)
+        corrected_heads, barline_ticks, tick_resolution=R,
+        grid_levels=grid_levels,
+        alpha=COARSE_HEAD_ALPHA if head_grid_floor == 0 else FINE_HEAD_ALPHA)
+    tail_grid_levels = [max(level, tail_grid_level) for level in grid_levels]
+    end_levels = []
+    for tick in corrected_ends:
+        measure = int(np.searchsorted(barline_ticks, tick, side="right") - 1)
+        end_levels.append(tail_grid_levels[measure]
+                          if 0 <= measure < len(tail_grid_levels)
+                          else tail_grid_level)
+    end_snaps = [snap_tick(
+        tick, tick_resolution=R,
+        allowed_denoms=MEASURE_GRID_LEVELS[level], grid_level=level)
+        for tick, level in zip(corrected_ends, end_levels, strict=True)]
+    end_by_note = dict(zip(
+        end_indices,
+        zip(raw_ends, corrected_ends, end_snaps, end_levels, strict=True),
+        strict=True))
     snaps = [_apply_timing_uncertainty(note, snap, clock)
              for note, snap in zip(raw.notes, snaps, strict=True)]
 
     chart_notes: list[ChartNote] = []
+    diagnostics: list[dict] = []
     anacrusis_floor = -ticks_per_global_measure       # 1-measure pickup zone
 
-    for raw_note, raw_t, snap in zip(raw.notes, raw_heads, snaps):
+    for note_index, (raw_note, raw_t, snap) in enumerate(
+            zip(raw.notes, raw_heads, snaps, strict=True)):
         # pickup-note drop: pre-first-barline by > one measure
         if snap.tick < anacrusis_floor:
             continue
 
         end_tick: int | None = None
+        raw_end: float | None = None
+        end_residual_ms: float | None = None
+        tail_snap_source: str | None = None
+        tail_off_grid = False
+        needs_review = (raw_note.pairing_status != "observed"
+                        or (raw_note.type == "longnote"
+                            and (snap.off_grid or snap.timing_uncertain)))
         if raw_note.type == "longnote" and raw_note.end_ms is not None:
-            raw_end = clock.ms_to_tick(raw_note.end_ms)
-            # snap LENGTH (relative), then offset from snapped head
-            raw_len = raw_end - raw_t
-            snapped_len = snap_length(raw_len, tick_resolution=R)
-            if snapped_len > 0:
-                end_tick = snap.tick + snapped_len
+            raw_end, corrected_end, end_snap, level = end_by_note[note_index]
+            corrected_end_ms = clock.tick_to_ms(corrected_end)
+            end_snap = _apply_endpoint_uncertainty(
+                corrected_end_ms, raw_note.end_sigma_ms or 0.0,
+                end_snap, clock)
+            raw_len = corrected_end - raw_t
+            length_snap = snap_tick(
+                raw_len, tick_resolution=R,
+                allowed_denoms=MEASURE_GRID_LEVELS[level], grid_level=level)
+            candidates = [
+                (end_snap.tick, end_snap.off_grid, "absolute"),
+                (snap.tick + length_snap.tick, length_snap.off_grid, "length"),
+            ]
+            candidates = [(tick, off_grid, source)
+                          for tick, off_grid, source in candidates
+                          if tick > snap.tick]
+            if candidates:
+                end_tick, tail_off_grid, tail_snap_source = min(
+                    candidates,
+                    key=lambda candidate: abs(corrected_end - candidate[0]))
             else:
-                end_tick = None        # collapsed to tap
+                end_tick = max(snap.tick + 1, int(round(raw_end)))
+                tail_snap_source = "raw-fallback"
+                tail_off_grid = needs_review = True
+            end_residual_ms = abs(
+                raw_note.end_ms - clock.tick_to_ms(end_tick))
+            needs_review |= tail_off_grid or end_snap.timing_uncertain
 
         chart_notes.append(ChartNote(
             lane=raw_note.lane,
             start_tick=snap.tick,
             end_tick=end_tick,
-            off_grid=snap.off_grid,
+            off_grid=snap.off_grid or tail_off_grid,
+            needs_review=needs_review,
         ))
+        diagnostics.append({
+            "source_raw_note": note_index,
+            "confidence": round(float(raw_note.confidence), 4),
+            "extrapolated": bool(raw_note.extrapolated),
+            "pairing_status": raw_note.pairing_status,
+            "start_sigma_ms": round(float(raw_note.start_sigma_ms), 3),
+            "end_sigma_ms": (round(float(raw_note.end_sigma_ms), 3)
+                             if raw_note.end_sigma_ms is not None else None),
+            "raw_start_tick": round(float(raw_t), 4),
+            "raw_end_tick": (round(float(raw_end), 4)
+                             if raw_end is not None else None),
+            "tail_bias_tick": (round(tail_bias_tick, 4)
+                               if raw_end is not None else None),
+            "tail_grid_level": (tail_grid_level
+                                if raw_end is not None else None),
+            "start_residual_ms": round(float(snap.timing_residual_ms), 3),
+            "end_residual_ms": (round(float(end_residual_ms), 3)
+                                if end_residual_ms is not None else None),
+            "tail_snap_source": tail_snap_source,
+            "needs_review": needs_review,
+        })
 
     # sort by (tick, lane) for stable downstream order
     order = sorted(range(len(chart_notes)),
                    key=lambda i: (chart_notes[i].start_tick,
                                   chart_notes[i].lane))
     chart_notes = [chart_notes[i] for i in order]
+    diagnostics = [diagnostics[i] for i in order]
     snaps_filtered = [snaps[i] for i, rn in enumerate(raw.notes)
                       if snaps[i].tick >= anacrusis_floor]
     # NOTE: snaps_filtered keeps original order; re-sort to match chart_notes
     # (used only for stats and diagnostics — order doesn't have to be perfect)
-    return chart_notes, snaps_filtered, grid_levels
+    return chart_notes, snaps_filtered, grid_levels, diagnostics
 
 
 def _apply_timing_uncertainty(raw_note, snap: SnapResult,
                               clock: TickClock) -> SnapResult:
     """Separate measurement-compatible misses from real timing outliers."""
-    residual_ms = abs(
-        raw_note.trigger_ms - clock.tick_to_ms(snap.tick))
-    uncertain = (snap.off_grid and raw_note.timing_sigma_ms > 0
-                 and residual_ms <= (TIMING_SIGMA_MULTIPLIER
-                                     * raw_note.timing_sigma_ms))
+    return _apply_endpoint_uncertainty(
+        raw_note.trigger_ms, raw_note.start_sigma_ms, snap, clock)
+
+
+def _apply_endpoint_uncertainty(event_ms: float, sigma_ms: float,
+                                snap: SnapResult,
+                                clock: TickClock) -> SnapResult:
+    residual_ms = abs(event_ms - clock.tick_to_ms(snap.tick))
+    uncertain = bool(snap.off_grid and sigma_ms > 0
+                     and residual_ms <= TIMING_SIGMA_MULTIPLIER * sigma_ms)
     return replace(
         snap,
         label="timing-uncertain" if uncertain else snap.label,
@@ -245,7 +390,8 @@ def _build_stats(notes: list[ChartNote],
                  clock: TickClock,
                  raw: RawChart,
                  bl_ticks: list[int],
-                 variants: list[TimeSigVariant]) -> dict:
+                 variants: list[TimeSigVariant],
+                 timeline) -> dict:
     key_count = raw.key_count
     per_lane = [0] * key_count
     for n in notes:
@@ -272,9 +418,23 @@ def _build_stats(notes: list[ChartNote],
     # quality (from detection debug info)
     extrap = sum(1 for n in raw.notes if n.extrapolated)
     low_conf = sum(1 for n in raw.notes if n.confidence < 0.5)
-    timing_sigmas = [n.timing_sigma_ms for n in raw.notes]
+    timing_sigmas = ([n.start_sigma_ms for n in raw.notes]
+                     + [n.end_sigma_ms for n in raw.notes
+                        if n.end_sigma_ms is not None])
     timing_residuals = [s.timing_residual_ms for s in snaps]
     raw_total = len(raw.notes) or 1
+    beat_intervals = np.diff([beat.ms for beat in raw.beats])
+    if len(beat_intervals):
+        beat_period = float(np.median(beat_intervals))
+        beat_interval_outliers = float(np.mean(
+            np.abs(beat_intervals - beat_period)
+            > max(1000.0 / raw.fps, beat_period * 0.2)))
+    else:
+        beat_interval_outliers = 0.0
+    barline_phase_residuals = [
+        min(abs(barline.ms - beat.ms) for beat in raw.beats)
+        for barline in raw.barlines
+    ] if raw.beats else []
 
     # structure
     duration_ms = raw.duration_ms
@@ -336,6 +496,20 @@ def _build_stats(notes: list[ChartNote],
                 if timing_residuals else 0.0,
         },
         "quality": {
+            "bpm_bound_adjustment_count": len(clock.bpm_bound_adjustments),
+            "inserted_beat_count": timeline.inserted_beats,
+            "deleted_beat_count": timeline.deleted_beats,
+            "beat_interval_outlier_ratio": round(
+                beat_interval_outliers, 4),
+            "barline_beat_phase_residual_ms_p95": round(
+                float(np.percentile(barline_phase_residuals, 95)), 3)
+                if barline_phase_residuals else 0.0,
+            "reconstructed_barline_ratio": round(
+                sum(barline.extrapolated for barline in timeline.barlines)
+                / max(1, len(timeline.barlines)), 4),
+            "orphan_tail_count": raw.orphan_tails,
+            "needs_review_ratio": round(
+                sum(note.needs_review for note in notes) / total_notes, 4),
             "extrapolated_ratio": round(extrap / raw_total, 4),
             "low_confidence_ratio": round(low_conf / raw_total, 4),
             "timing_sigma_ms_p50": round(

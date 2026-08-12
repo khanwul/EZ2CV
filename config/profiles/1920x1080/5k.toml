@@ -37,6 +37,10 @@ tail_release_offset_px = 13       # extra descent past the tail-sprite bottom be
                                   # (Dream Walker 221 LN, GEHENNA 102 LN); without it
                                   # longnote lengths land ~1/64 note short after snapping.
 
+[alignment]
+band_y = [814, 832]               # cyan judgment-band rows, end-exclusive
+max_shift_px = 32                 # translation only; no scale/rotation guessing
+
 [beat_indicator]
 # POW LED ROI [x1,y1,x2,y2], native pixels. Detection method is in skin.toml.
 roi = [728, 844, 731, 851]

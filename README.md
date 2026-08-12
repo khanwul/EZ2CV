@@ -30,7 +30,8 @@ Please configure the settings as instructed, if possible.
 
 video settings
 - resolution: 1920*1080
-- fps: 60 (The video must maintain a consistent frame rate. This has a significant impact on accuracy.)
+- fps: 60 (The calibrated average FPS must match; event milliseconds use the
+  decoded container PTS when available.)
 
 ingame settings
 - **No input should be provided during gameplay.** This project has been developed on the assumption that there is no input during gameplay, and this has a significant impact on accuracy. We recommend recording your gameplay using **LIVE CTRL** mode.
@@ -48,8 +49,11 @@ profile; create a recalibrated profile before using another speed.
     The settings are based on the height of 'old'. You can change this to the height of 'new' in the config file.
     - judgement tracker: off
     - **Panel Opacity: 100%**
-    - panel align: CENTER  
-    You can change this by editing the coordinates in the config file to suit your location. The default setting is 'center'.
+- panel align: CENTER
+    The bundled profiles detect translation of the cyan judgment band and
+    normalize panel offsets up to 32px. Scale, rotation, and a different panel
+    layout still require a recalibrated profile. Alignment failure is fatal;
+    use `--force` only when intentionally accepting the configured coordinates.
     - panel bg: none
     - judge height: 700 (max)
 
@@ -86,6 +90,9 @@ uv run ez2cv
 uv run ez2cv "config/<song>.toml"
 ```
 
+`--force` permits an FPS or panel-alignment mismatch and records the fallback
+in the raw checkpoint. It should not be used for ordinary extraction.
+
 With no TOML argument, every song config directly under `config/` is processed
 in filename order. The `config/song.toml` template and nested profile/skin
 TOMLs are skipped.
@@ -110,8 +117,8 @@ uv run ez2cv "out/<song>/<difficulty>/<song>_raw.json" --from-raw
 
 Two JSON files are written under `out/<song>/<difficulty>/`:
 
-- `<song>_raw.json` — reloadable ms-based detection checkpoint (schema 2.2)
-- `<song>_chart.json` — `ez2cv.chart` 3.2 tick chart with explicit game, tempo,
+- `<song>_raw.json` — reloadable ms-based detection checkpoint (schema 2.3)
+- `<song>_chart.json` — `ez2cv.chart` 3.3 tick chart with explicit game, tempo,
   and meter timelines
 
 ## Tests
