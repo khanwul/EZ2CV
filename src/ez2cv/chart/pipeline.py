@@ -1,20 +1,6 @@
-"""Convert a reloadable millisecond-domain ``RawChart`` into tick data.
+"""Convert a millisecond-domain ``RawChart`` into a tick-domain ``Chart``.
 
-    1. normalize beat observations without inventing missing events
-    2. infer arbitrary per-measure meters on the beat grid
-    3. select denoised tempo anchors, including clear mid-measure steps
-    4. ms → tick conversion for every note (head + tail)
-    5. snap-to-grid (quantizer); longnote tails compare endpoint and length snaps
-    6. pickup-note policy: keep one measure pre-anacrusis, drop earlier
-    7. ``Chart`` ready for serialization
-
-What chart conversion deliberately does not do
------------------------------------------------
-* No JSON I/O.
-* No video re-decoding; it reads only ``RawChart``.
-* No second-pass BPM refinement using already-snapped notes. Raw note times may
-  choose between clocks already supported by beat/barline observations, but
-  snapped chart notes never feed back into timing inference.
+Snapped notes do not feed back into timeline inference.
 """
 
 from __future__ import annotations
@@ -318,7 +304,6 @@ def _convert_and_snap_notes(raw: RawChart, clock: TickClock,
             "needs_review": needs_review,
         })
 
-    # sort by (tick, lane) for stable downstream order
     order = sorted(range(len(chart_notes)),
                    key=lambda i: (chart_notes[i].start_tick,
                                   chart_notes[i].lane))
@@ -326,8 +311,6 @@ def _convert_and_snap_notes(raw: RawChart, clock: TickClock,
     diagnostics = [diagnostics[i] for i in order]
     snaps_filtered = [snaps[i] for i, rn in enumerate(raw.notes)
                       if snaps[i].tick >= anacrusis_floor]
-    # NOTE: snaps_filtered keeps original order; re-sort to match chart_notes
-    # (used only for stats and diagnostics — order doesn't have to be perfect)
     return chart_notes, snaps_filtered, grid_levels, diagnostics
 
 
